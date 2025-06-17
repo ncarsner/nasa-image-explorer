@@ -1,0 +1,8 @@
+fastapi
+nicegui
+httpx
+uv
+pytest
+pre-commit
+uvicorn
+pytest-asyncio
