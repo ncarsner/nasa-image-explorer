@@ -1,36 +1,32 @@
-from fastapi import FastAPI
+"""FastAPI + NiceGUI entrypoint for the NASA Image Explorer."""
+
+from fastapi import FastAPI, HTTPException, Query
 from nicegui import ui
+
+from nasa_api import DEFAULT_LIMIT, NasaApiError, search_images
 from ui import render_main_page
-import httpx
-from nasa_api import search_images
 
-# Project Structure
-"""
-nasa-image-explorer/
-│
-├── app.py                  # Main FastAPI + NiceGUI app entrypoint
-├── nasa_api.py             # NASA Open API client (no API key needed)
-├── ui.py                   # NiceGUI UI components and layout
-├── requirements.txt        # Python dependencies
-├── .pre-commit-config.yaml # Pre-commit hooks config
-├── README.md               # Project overview and instructions
-└── tests/
-    └── test_nasa_api.py    # Basic tests for NASA API client
-"""
+app = FastAPI(title="NASA Image Explorer")
 
-app = FastAPI()
 
-# TODO: Mount NiceGUI to FastAPI
-# TODO: Add root endpoint to render_main_page
+@app.get("/api/search")
+async def api_search(
+    q: str = Query(..., min_length=1, description="Search term"),
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=100),
+) -> dict:
+    """JSON view of the same search the UI performs."""
+    try:
+        results = await search_images(q, limit=limit)
+    except NasaApiError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"query": q, "count": len(results), "results": results}
+
+
+# Mounted last: NiceGUI claims "/", so any FastAPI route must be registered above.
+ui.run_with(app, root=render_main_page, title="NASA Image Explorer", favicon="🚀")
+
 
 if __name__ == "__main__":
-    ...
-    # TODO: Run NiceGUI app
-    # ui.run(app, title='NASA Image Explorer')
+    import uvicorn
 
-
-# Next Steps:
-# 1. Implement NASA API client in nasa_api.py
-# 2. Build UI in ui.py using NiceGUI
-# 3. Wire up FastAPI and NiceGUI in app.py
-# 4. Add pre-commit hooks and write tests
+    uvicorn.run(app, host="127.0.0.1", port=8000)

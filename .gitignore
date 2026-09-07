@@ -176,9 +176,9 @@ cython_debug/
 .abstra/
 
 # Visual Studio Code
-#  Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
+#  Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore
 #  that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
-#  and can be added to the global gitignore or merged into this file. However, if you prefer, 
+#  and can be added to the global gitignore or merged into this file. However, if you prefer,
 #  you could uncomment the following to ignore the enitre vscode folder
 # .vscode/
 
@@ -194,3 +194,42 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# AI coding assistants / agents
+#   Local agent config, session state, transcripts, and per-tool instruction files.
+#   None of these belong in the repo.
+.claude/
+.claude.json
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+AGENT.md
+.agent/
+.agents/
+.mcp.json
+
+#   Cursor
+.cursor/
+.cursorrules
+
+#   GitHub Copilot
+.github/copilot-instructions.md
+
+#   Aider
+.aider*
+.aider.chat.history.md
+.aider.input.history
+.aider.tags.cache.v*/
+
+#   Gemini CLI / Codex / Continue / Windsurf / Cline / Roo
+.gemini/
+GEMINI.md
+.codex/
+.continue/
+.windsurf/
+.windsurfrules
+.clinerules
+.roo/
+
+#   SpecStory and similar transcript exporters
+.specstory/
