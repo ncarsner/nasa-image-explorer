@@ -1,8 +1,9 @@
-fastapi
-nicegui
-httpx
-uv
-pytest
-pre-commit
-uvicorn
-pytest-asyncio
+fastapi>=0.141
+nicegui>=3.16
+httpx>=0.28
+uvicorn>=0.35
+
+# Development
+pytest>=9.1
+pytest-asyncio>=1.4
+pre-commit>=4.6
