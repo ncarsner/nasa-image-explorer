@@ -1,5 +1,7 @@
 # nasa-image-explorer
 
+[![CI](https://github.com/ncarsner/nasa-image-explorer/actions/workflows/ci.yml/badge.svg)](https://github.com/ncarsner/nasa-image-explorer/actions/workflows/ci.yml)
+
 Pybites Community Challenge: Build a NASA Image Explorer app using NASA Open APIs.
 
 Search NASA's public [image library](https://images-api.nasa.gov) from a NiceGUI
@@ -13,8 +15,11 @@ front end served by FastAPI. No API key required.
 | `nasa_api.py` | Async NASA Images API client |
 | `ui.py` | NiceGUI search page and image gallery |
 | `tests/` | Tests for the API client and the JSON endpoint |
+| `.github/workflows/ci.yml` | Lint and test workflow |
 
 ## Setup
+
+Requires Python 3.10 or newer.
 
 ```bash
 uv venv
@@ -36,3 +41,6 @@ Then open <http://127.0.0.1:8000>. The same search is available as JSON at
 ```bash
 .venv/bin/python -m pytest
 ```
+
+GitHub Actions runs `pre-commit run --all-files` and the test suite on Python
+3.10 through 3.14 for every push to `main` and every pull request.
