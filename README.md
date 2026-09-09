@@ -33,8 +33,12 @@ pre-commit install
 .venv/bin/python app.py
 ```
 
-Then open <http://127.0.0.1:8000>. The same search is available as JSON at
-`/api/search?q=mars&limit=10`, and the OpenAPI docs at `/docs`.
+Then open <http://127.0.0.1:8000>. Results are paged, 24 at a time, with
+prev/next controls under the gallery. The same search is available as JSON at
+`/api/search?q=mars&page=2&limit=10`, and the OpenAPI docs at `/docs`.
+
+The API serves at most 10,000 results for a query, so deep paging stops there
+even when a search reports far more hits.
 
 ## Test
 
