@@ -3,7 +3,7 @@
 from fastapi import FastAPI, HTTPException, Query
 from nicegui import ui
 
-from nasa_api import DEFAULT_LIMIT, NasaApiError, search_images
+from nasa_api import DEFAULT_LIMIT, MAX_PAGE_SIZE, NasaApiError, search_images
 from ui import render_main_page
 
 app = FastAPI(title="NASA Image Explorer")
@@ -12,14 +12,24 @@ app = FastAPI(title="NASA Image Explorer")
 @app.get("/api/search")
 async def api_search(
     q: str = Query(..., min_length=1, description="Search term"),
-    limit: int = Query(DEFAULT_LIMIT, ge=1, le=100),
+    page: int = Query(1, ge=1, description="1-based page number"),
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_PAGE_SIZE),
 ) -> dict:
     """JSON view of the same search the UI performs."""
     try:
-        results = await search_images(q, limit=limit)
+        found = await search_images(q, page=page, limit=limit)
     except NasaApiError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return {"query": q, "count": len(results), "results": results}
+    return {
+        "query": q,
+        "page": found.page,
+        "page_size": found.page_size,
+        "count": len(found.results),
+        "total_hits": found.total_hits,
+        "has_prev": found.has_prev,
+        "has_next": found.has_next,
+        "results": found.results,
+    }
 
 
 # Mounted last: NiceGUI claims "/", so any FastAPI route must be registered above.
