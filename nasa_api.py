@@ -2,10 +2,12 @@
 
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import quote, urlparse, urlunparse
 
 import httpx
 
 NASA_SEARCH_URL = "https://images-api.nasa.gov/search"
+NASA_ASSET_URL = "https://images-api.nasa.gov/asset"
 DEFAULT_LIMIT = 24
 MAX_PAGE_SIZE = 100
 REQUEST_TIMEOUT = 15.0
@@ -13,6 +15,10 @@ REQUEST_TIMEOUT = 15.0
 # The API refuses to serve any page reaching past its 10,000th result, answering
 # 400 instead - even though the last page it will serve still advertises `next`.
 MAX_RESULTS = 10_000
+
+# Not every item is published in every size, so the detail view falls back
+# through this order. `orig` sits mid-list because it can be a huge TIFF.
+RENDITION_PREFERENCE = ("large", "medium", "orig", "small", "thumb")
 
 
 class NasaApiError(RuntimeError):
@@ -45,6 +51,27 @@ class SearchPage:
         return self.start_index + len(self.results) - 1 if self.results else 0
 
 
+@dataclass(frozen=True, slots=True)
+class ImageAsset:
+    """The renditions the API publishes for one image, keyed by size."""
+
+    nasa_id: str
+    renditions: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def display_url(self) -> str | None:
+        """The largest rendition worth showing inline, or None if there is none."""
+        for size in RENDITION_PREFERENCE:
+            if size in self.renditions:
+                return self.renditions[size]
+        return None
+
+    @property
+    def original_url(self) -> str | None:
+        """The unresized master file, whatever its format."""
+        return self.renditions.get("orig")
+
+
 async def search_images(
     query: str,
     *,
@@ -70,7 +97,7 @@ async def search_images(
         "page_size": page_size,
     }
     try:
-        response = await _get(params, client)
+        response = await _get_url(NASA_SEARCH_URL, params, client)
         _raise_for_status(response)
         payload = response.json()
     except httpx.HTTPError as exc:
@@ -81,13 +108,42 @@ async def search_images(
     return _parse_page(payload, page, page_size)
 
 
-async def _get(
-    params: dict[str, str | int], client: httpx.AsyncClient | None
+async def get_asset(
+    nasa_id: str,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> ImageAsset:
+    """Look up every published rendition of one image, keyed by size.
+
+    Sizes vary by item - plenty have no `large` - so read `display_url` rather
+    than indexing `renditions` directly.
+    """
+    nasa_id = nasa_id.strip()
+    if not nasa_id:
+        return ImageAsset(nasa_id="")
+
+    url = f"{NASA_ASSET_URL}/{quote(nasa_id, safe='')}"
+    try:
+        response = await _get_url(url, None, client)
+        _raise_for_status(response)
+        payload = response.json()
+    except httpx.HTTPError as exc:
+        raise NasaApiError(f"NASA asset lookup failed: {exc}") from exc
+    except ValueError as exc:
+        raise NasaApiError("NASA asset lookup returned malformed JSON") from exc
+
+    return _parse_asset(nasa_id, payload)
+
+
+async def _get_url(
+    url: str,
+    params: dict[str, str | int] | None,
+    client: httpx.AsyncClient | None,
 ) -> httpx.Response:
     if client is not None:
-        return await client.get(NASA_SEARCH_URL, params=params)
+        return await client.get(url, params=params)
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as owned_client:
-        return await owned_client.get(NASA_SEARCH_URL, params=params)
+        return await owned_client.get(url, params=params)
 
 
 def _raise_for_status(response: httpx.Response) -> None:
@@ -124,6 +180,36 @@ def _parse_page(payload: Any, page: int, page_size: int) -> SearchPage:
     )
 
 
+def _parse_asset(nasa_id: str, payload: Any) -> ImageAsset:
+    if not isinstance(payload, dict):
+        raise NasaApiError("NASA asset lookup returned an unexpected payload")
+
+    renditions: dict[str, str] = {}
+    for item in (payload.get("collection") or {}).get("items") or []:
+        href = item.get("href")
+        size = _rendition_size(str(href)) if href else None
+        # The API lists sizes largest-first; keep the first href for each.
+        if size and size not in renditions:
+            renditions[size] = _https(str(href))
+    return ImageAsset(nasa_id=nasa_id, renditions=renditions)
+
+
+def _rendition_size(href: str) -> str | None:
+    """`.../PIA07081~large.jpg` -> `large`. Files without a `~` (metadata.json) -> None."""
+    filename = urlparse(href).path.rsplit("/", 1)[-1]
+    if "~" not in filename:
+        return None
+    return filename.rsplit("~", 1)[-1].rsplit(".", 1)[0].lower() or None
+
+
+def _https(url: str) -> str:
+    """Asset hrefs come back as plain http, which browsers block on an https page."""
+    parts = urlparse(url)
+    if parts.scheme != "http":
+        return url
+    return urlunparse(parts._replace(scheme="https"))
+
+
 def _total_hits(collection: dict[str, Any]) -> int:
     raw = (collection.get("metadata") or {}).get("total_hits")
     return raw if isinstance(raw, int) else 0
@@ -140,9 +226,14 @@ def _parse_items(items: list[Any], limit: int) -> list[dict[str, str]]:
         results.append(
             {
                 "title": metadata.get("title") or "Untitled",
-                "url": preview_url,
+                "url": _https(preview_url),
                 "description": metadata.get("description") or "",
                 "nasa_id": metadata.get("nasa_id") or "",
+                "date_created": metadata.get("date_created") or "",
+                "photographer": metadata.get("photographer")
+                or metadata.get("secondary_creator")
+                or "",
+                "center": metadata.get("center") or "",
             }
         )
         if len(results) >= limit:
