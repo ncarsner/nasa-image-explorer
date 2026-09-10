@@ -32,7 +32,9 @@ CACHE_MAX_ENTRIES = 128
 # at module scope rather than in `app.state`.
 _shared_client: httpx.AsyncClient | None = None
 
-_CacheKey = tuple[str, int, int]
+# Query, page, page size, then the filters - two searches that differ only by
+# filter are different searches.
+_CacheKey = tuple[str, int, int, int | None, int | None, str]
 _cache: "OrderedDict[_CacheKey, tuple[float, SearchPage]]" = OrderedDict()
 
 # Indirection so tests can wind the clock forward without sleeping.
@@ -114,30 +116,45 @@ async def search_images(
     *,
     page: int = 1,
     limit: int = DEFAULT_LIMIT,
+    year_start: int | None = None,
+    year_end: int | None = None,
+    center: str | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> SearchPage:
     """Search NASA's image library and return one page of preview images.
 
     Each result is a dict with `title`, `url`, `description` and `nasa_id` keys.
+    `year_start`, `year_end` and `center` narrow the search; unset ones are left
+    out of the request entirely, because the API answers 400 to an empty
+    `year_start` and silently ignores an empty `center`.
     Pass `client` to reuse a connection pool, or to inject a transport in tests.
     """
     query = query.strip()
     page = max(1, page)
     page_size = min(max(1, limit), MAX_PAGE_SIZE)
+    # The API matches centers case-insensitively, so folding here keeps searches
+    # that differ only in case on a single cache entry.
+    center = (center or "").strip().upper()
     if not query:
         return SearchPage(page=page, page_size=page_size)
 
-    key = (query, page, page_size)
+    key = (query, page, page_size, year_start, year_end, center)
     cached = _cached(key)
     if cached is not None:
         return cached
 
-    params = {
+    params: dict[str, str | int] = {
         "q": query,
         "media_type": "image",
         "page": page,
         "page_size": page_size,
     }
+    if year_start is not None:
+        params["year_start"] = year_start
+    if year_end is not None:
+        params["year_end"] = year_end
+    if center:
+        params["center"] = center
     try:
         response = await _get_url(NASA_SEARCH_URL, params, client)
         _raise_for_status(response)

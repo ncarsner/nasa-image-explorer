@@ -39,6 +39,12 @@ rendition NASA publishes for it, along with its date, photographer, center and
 full description. The same search is available as JSON at
 `/api/search?q=mars&page=2&limit=10`, and the OpenAPI docs at `/docs`.
 
+The **Filters** panel above the gallery narrows a search to a year range, a NASA
+center (`JPL`, `JSC`, `KSC`, ...), or both; changing a filter re-runs the search
+from the first page. The same filters are query parameters on the endpoint:
+`/api/search?q=apollo&year_start=1969&year_end=1972&center=JSC`. Filters left
+blank are omitted from the request rather than sent empty, which the API rejects.
+
 The API serves at most 10,000 results for a query, so deep paging stops there
 even when a search reports far more hits. Identical searches are answered from
 a small in-process cache for five minutes, so paging back and forth does not

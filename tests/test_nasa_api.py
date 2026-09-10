@@ -66,6 +66,9 @@ NOVA_RESULT = {
 }
 
 
+FILTER_PARAMS = ("year_start", "year_end", "center")
+
+
 def payload(*, items=None, total_hits=2, links=None) -> dict:
     collection: dict = {
         "items": SAMPLE_ITEMS if items is None else items,
@@ -86,7 +89,10 @@ def responding(response: httpx.Response, seen: dict | None = None):
     def handler(request: httpx.Request) -> httpx.Response:
         if seen is not None:
             seen["url"] = str(request.url)
-            seen["params"] = parse_qs(urlparse(str(request.url)).query)
+            # Blanks kept: sending `year_start=` is a 400, so tests must see it.
+            seen["params"] = parse_qs(
+                urlparse(str(request.url)).query, keep_blank_values=True
+            )
         return response
 
     return handler
@@ -269,6 +275,7 @@ def test_api_search_returns_results(test_client):
     assert response.status_code == 200
     assert response.json() == {
         "query": "galaxy",
+        "filters": {"year_start": None, "year_end": None, "center": None},
         "page": 2,
         "page_size": 24,
         "count": 1,
@@ -277,7 +284,9 @@ def test_api_search_returns_results(test_client):
         "has_next": True,
         "results": [GALAXY_RESULT],
     }
-    mock_search.assert_awaited_once_with("galaxy", page=2, limit=24)
+    mock_search.assert_awaited_once_with(
+        "galaxy", page=2, limit=24, year_start=None, year_end=None, center=None
+    )
 
 
 def test_api_search_defaults_to_the_first_page(test_client):
@@ -286,7 +295,9 @@ def test_api_search_defaults_to_the_first_page(test_client):
     ) as mock_search:
         test_client.get("/api/search", params={"q": "galaxy"})
 
-    mock_search.assert_awaited_once_with("galaxy", page=1, limit=24)
+    mock_search.assert_awaited_once_with(
+        "galaxy", page=1, limit=24, year_start=None, year_end=None, center=None
+    )
 
 
 @pytest.mark.parametrize("params", [{"q": ""}, {"q": "galaxy", "page": 0}])
@@ -552,3 +563,109 @@ async def test_searches_fall_back_to_the_shared_client(monkeypatch):
 
     assert handler.calls == 1
     assert found.results
+
+
+@pytest.mark.parametrize(
+    ("filters", "expected"),
+    [
+        ({}, {}),
+        ({"year_start": 1969}, {"year_start": ["1969"]}),
+        ({"year_end": 1972}, {"year_end": ["1972"]}),
+        ({"center": "JSC"}, {"center": ["JSC"]}),
+        (
+            {"year_start": 1969, "year_end": 1972, "center": "JSC"},
+            {"year_start": ["1969"], "year_end": ["1972"], "center": ["JSC"]},
+        ),
+    ],
+)
+async def test_filters_are_sent_only_when_set(filters, expected):
+    seen: dict = {}
+    handler = responding(httpx.Response(200, json=payload()), seen)
+
+    async with mock_client(handler) as client:
+        await search_images("apollo", **filters, client=client)
+
+    sent = {k: v for k, v in seen["params"].items() if k in FILTER_PARAMS}
+    assert sent == expected
+
+
+@pytest.mark.parametrize("unset", [None, "", "   "])
+async def test_an_unset_center_is_left_out_of_the_request(unset):
+    # An empty `center` is ignored by the API, but an empty `year_start` is a 400,
+    # so nothing half-set is worth sending either way.
+    seen: dict = {}
+    handler = responding(httpx.Response(200, json=payload()), seen)
+
+    async with mock_client(handler) as client:
+        await search_images("apollo", center=unset, client=client)
+
+    assert "center" not in seen["params"]
+
+
+async def test_center_is_folded_to_upper_case():
+    seen: dict = {}
+    handler = responding(httpx.Response(200, json=payload()), seen)
+
+    async with mock_client(handler) as client:
+        await search_images("apollo", center=" jsc ", client=client)
+
+    assert seen["params"]["center"] == ["JSC"]
+
+
+async def test_searches_that_differ_only_by_filter_are_cached_separately():
+    handler = CountingHandler()
+
+    async with mock_client(handler) as client:
+        await search_images("apollo", client=client)
+        await search_images("apollo", year_start=1969, client=client)
+        await search_images("apollo", year_end=1969, client=client)
+        await search_images("apollo", center="JSC", client=client)
+        await search_images("apollo", center="jsc", client=client)
+
+    # Five searches, four distinct filter sets - the case-only repeat is a hit.
+    assert handler.calls == 4
+
+
+async def test_api_search_passes_filters_through(test_client):
+    with patch.object(
+        app_module, "search_images", AsyncMock(return_value=SearchPage())
+    ) as mock_search:
+        response = test_client.get(
+            "/api/search",
+            params={
+                "q": "apollo",
+                "year_start": 1969,
+                "year_end": 1972,
+                "center": "jsc",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["filters"] == {
+        "year_start": 1969,
+        "year_end": 1972,
+        "center": "JSC",
+    }
+    mock_search.assert_awaited_once_with(
+        "apollo", page=1, limit=24, year_start=1969, year_end=1972, center="jsc"
+    )
+
+
+async def test_api_search_reports_unfiltered_searches_as_unfiltered(test_client):
+    with patch.object(
+        app_module, "search_images", AsyncMock(return_value=SearchPage())
+    ):
+        response = test_client.get("/api/search", params={"q": "apollo"})
+
+    assert response.json()["filters"] == {
+        "year_start": None,
+        "year_end": None,
+        "center": None,
+    }
+
+
+@pytest.mark.parametrize("bad", [{"year_start": "abc"}, {"year_end": 42}])
+async def test_api_search_rejects_unusable_years(test_client, bad):
+    response = test_client.get("/api/search", params={"q": "apollo", **bad})
+
+    assert response.status_code == 422
