@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app as app_module
+import nasa_api
 from nasa_api import (
     NASA_ASSET_URL,
     NASA_SEARCH_URL,
@@ -424,3 +425,130 @@ async def test_get_asset_rejects_an_unexpected_payload():
     async with mock_client(handler) as client:
         with pytest.raises(NasaApiError):
             await get_asset("PIA00001", client=client)
+
+
+class CountingHandler:
+    """A MockTransport handler that records how many requests it answered."""
+
+    def __init__(self, response: httpx.Response | None = None):
+        self.response = response or httpx.Response(200, json=payload())
+        self.calls = 0
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.calls += 1
+        return self.response
+
+
+async def test_repeat_search_is_served_from_cache():
+    handler = CountingHandler()
+
+    async with mock_client(handler) as client:
+        first = await search_images("galaxy", client=client)
+        second = await search_images("galaxy", client=client)
+
+    assert handler.calls == 1
+    assert first.results == second.results
+    assert second.total_hits == first.total_hits
+
+
+@pytest.mark.parametrize(
+    "second_call",
+    [
+        {"query": "nebula", "page": 1, "limit": 24},
+        {"query": "galaxy", "page": 2, "limit": 24},
+        {"query": "galaxy", "page": 1, "limit": 10},
+    ],
+    ids=["query", "page", "limit"],
+)
+async def test_cache_keys_on_query_page_and_limit(second_call):
+    handler = CountingHandler()
+
+    async with mock_client(handler) as client:
+        await search_images("galaxy", page=1, limit=24, client=client)
+        await search_images(
+            second_call["query"],
+            page=second_call["page"],
+            limit=second_call["limit"],
+            client=client,
+        )
+
+    assert handler.calls == 2
+
+
+async def test_cache_entry_expires_after_the_ttl(monkeypatch):
+    handler = CountingHandler()
+    now = 1000.0
+    monkeypatch.setattr(nasa_api, "_clock", lambda: now)
+
+    async with mock_client(handler) as client:
+        await search_images("galaxy", client=client)
+        now += nasa_api.CACHE_TTL - 1
+        await search_images("galaxy", client=client)
+        assert handler.calls == 1, "still fresh"
+
+        now += 2
+        await search_images("galaxy", client=client)
+
+    assert handler.calls == 2
+
+
+async def test_a_failed_search_is_not_cached():
+    responses = [httpx.Response(500, text="boom"), httpx.Response(200, json=payload())]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return responses.pop(0)
+
+    async with mock_client(handler) as client:
+        with pytest.raises(NasaApiError):
+            await search_images("galaxy", client=client)
+        found = await search_images("galaxy", client=client)
+
+    assert found.results, "the retry reached the API rather than a cached failure"
+
+
+async def test_cache_is_bounded(monkeypatch):
+    monkeypatch.setattr(nasa_api, "CACHE_MAX_ENTRIES", 3)
+    handler = CountingHandler()
+
+    async with mock_client(handler) as client:
+        for term in ("one", "two", "three", "four"):
+            await search_images(term, client=client)
+        assert len(nasa_api._cache) == 3
+        # "one" was evicted first, so asking again costs another request.
+        await search_images("one", client=client)
+
+    assert handler.calls == 5
+
+
+async def test_a_caller_cannot_edit_what_is_cached():
+    handler = CountingHandler()
+
+    async with mock_client(handler) as client:
+        first = await search_images("galaxy", client=client)
+        first.results.clear()
+        second = await search_images("galaxy", client=client)
+
+    assert handler.calls == 1
+    assert len(second.results) == 2
+
+
+def test_lifespan_opens_one_client_and_closes_it():
+    with TestClient(app_module.app):
+        shared = nasa_api._shared_client
+        assert shared is not None
+        assert not shared.is_closed
+
+    assert shared.is_closed
+    assert nasa_api._shared_client is None
+
+
+async def test_searches_fall_back_to_the_shared_client(monkeypatch):
+    """A NiceGUI handler passes no client, so the shared one has to be found."""
+    handler = CountingHandler()
+
+    async with mock_client(handler) as shared:
+        monkeypatch.setattr(nasa_api, "_shared_client", shared)
+        found = await search_images("galaxy")
+
+    assert handler.calls == 1
+    assert found.results
