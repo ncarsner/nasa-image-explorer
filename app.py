@@ -20,14 +20,30 @@ async def api_search(
     q: str = Query(..., min_length=1, description="Search term"),
     page: int = Query(1, ge=1, description="1-based page number"),
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_PAGE_SIZE),
+    # The API wants four-digit years and answers 400 to anything else.
+    year_start: int | None = Query(None, ge=1000, le=9999, description="Earliest year"),
+    year_end: int | None = Query(None, ge=1000, le=9999, description="Latest year"),
+    center: str | None = Query(None, description="NASA center code, e.g. JPL"),
 ) -> dict:
     """JSON view of the same search the UI performs."""
     try:
-        found = await search_images(q, page=page, limit=limit)
+        found = await search_images(
+            q,
+            page=page,
+            limit=limit,
+            year_start=year_start,
+            year_end=year_end,
+            center=center,
+        )
     except NasaApiError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {
         "query": q,
+        "filters": {
+            "year_start": year_start,
+            "year_end": year_end,
+            "center": (center or "").strip().upper() or None,
+        },
         "page": found.page,
         "page_size": found.page_size,
         "count": len(found.results),

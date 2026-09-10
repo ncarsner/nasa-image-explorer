@@ -10,6 +10,21 @@ from nasa_api import NasaApiError, SearchPage, get_asset, search_images
 GRID_CLASSES = "w-full gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3"
 PROMPT = "Enter a search term to get started."
 
+# Suggestions only - the API takes any center code, and rejects none of them.
+CENTERS = (
+    "ARC",
+    "AFRC",
+    "GRC",
+    "GSFC",
+    "HQ",
+    "JPL",
+    "JSC",
+    "KSC",
+    "LARC",
+    "MSFC",
+    "SSC",
+)
+
 
 @dataclass
 class SearchState:
@@ -17,6 +32,9 @@ class SearchState:
 
     query: str = ""
     page: int = 1
+    year_start: int | None = None
+    year_end: int | None = None
+    center: str = ""
 
 
 def render_main_page() -> None:
@@ -27,10 +45,23 @@ def render_main_page() -> None:
     with ui.column().classes("w-full max-w-5xl mx-auto p-4 gap-4"):
         ui.label("NASA Image Explorer").classes("text-3xl font-bold")
         with ui.row().classes("w-full items-center gap-2"):
-            search_box = ui.input(
-                placeholder="Search NASA images, e.g. 'Mars rover'"
-            ).classes("grow")
+            search_box = (
+                ui.input(placeholder="Search NASA images, e.g. 'Mars rover'")
+                .classes("grow")
+                .mark("query")
+            )
             search_button = ui.button("Search", icon="search").mark("search")
+        filters = ui.expansion("Filters", icon="filter_alt").classes("w-full")
+        filters.mark("filters")
+        with filters, ui.row().classes("w-full items-center gap-4"):
+            year_start_box = _year_input("From year").mark("year-start")
+            year_end_box = _year_input("To year").mark("year-end")
+            center_box = (
+                ui.input("Center", placeholder="e.g. JPL", autocomplete=list(CENTERS))
+                .props("dense outlined clearable debounce=600")
+                .classes("grow")
+                .mark("center")
+            )
         status = ui.label(PROMPT).classes("text-sm text-gray-500")
         spinner = ui.spinner(size="lg")
         spinner.set_visibility(False)
@@ -81,13 +112,16 @@ def render_main_page() -> None:
         """Paint one page of results and set the pager to match it."""
         gallery.clear()
         if not found.results:
-            status.set_text(f"No images found for {state.query!r}.")
+            status.set_text(
+                f"No images found for {state.query!r}.{_filters_text(state)}"
+            )
             pager.set_visibility(False)
             return
 
         status.set_text(
             f"Showing {found.start_index}-{found.end_index} "
             f"of {found.total_hits:,} results for {state.query!r}."
+            f"{_filters_text(state)}"
         )
         with gallery:
             for image in found.results:
@@ -104,7 +138,13 @@ def render_main_page() -> None:
         spinner.set_visibility(True)
         status.set_text(f"Searching for {state.query!r}...")
         try:
-            found = await search_images(state.query, page=state.page)
+            found = await search_images(
+                state.query,
+                page=state.page,
+                year_start=state.year_start,
+                year_end=state.year_end,
+                center=state.center,
+            )
         except NasaApiError as exc:
             gallery.clear()
             pager.set_visibility(False)
@@ -117,8 +157,15 @@ def render_main_page() -> None:
         show(found)
 
     async def run_search() -> None:
-        """Start a new search, which always begins at the first page."""
+        """Start a new search, which always begins at the first page.
+
+        Also how a filter change re-runs: page 1 is the only page whose numbering
+        still means anything once the result set underneath it has changed.
+        """
         state.query = (search_box.value or "").strip()
+        state.year_start = _year(year_start_box.value)
+        state.year_end = _year(year_end_box.value)
+        state.center = (center_box.value or "").strip().upper()
         state.page = 1
         if not state.query:
             gallery.clear()
@@ -131,10 +178,44 @@ def render_main_page() -> None:
         state.page = max(1, state.page + step)
         await load()
 
+    for box in (year_start_box, year_end_box, center_box):
+        box.on_value_change(lambda: run_search())
+
     search_button.on_click(run_search)
     search_box.on("keydown.enter", run_search)
     prev_button.on_click(lambda: turn_page(-1))
     next_button.on_click(lambda: turn_page(1))
+
+
+def _year_input(label: str) -> ui.number:
+    """A year box. Debounced, so typing 1969 is one search rather than four."""
+    return (
+        ui.number(label, format="%d", min=1000, max=9999)
+        .props("dense outlined clearable debounce=600")
+        .classes("w-36")
+    )
+
+
+def _year(value) -> int | None:
+    """`ui.number` hands back a float or None; the API wants a plain year."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _filters_text(state: SearchState) -> str:
+    """A trailing ' Filtered by ...' clause, or nothing when no filter is set."""
+    bits = []
+    if state.year_start and state.year_end:
+        bits.append(f"{state.year_start}-{state.year_end}")
+    elif state.year_start:
+        bits.append(f"{state.year_start} onwards")
+    elif state.year_end:
+        bits.append(f"up to {state.year_end}")
+    if state.center:
+        bits.append(state.center)
+    return f" Filtered by {', '.join(bits)}." if bits else ""
 
 
 def _render_card(image: dict[str, str], on_click) -> None:

@@ -2,7 +2,6 @@
 
 from unittest.mock import AsyncMock, patch
 
-from nicegui import ui as nicegui_ui
 from nicegui.testing import User
 
 import ui as ui_module
@@ -60,18 +59,20 @@ async def test_page_starts_empty(user: User):
 
 async def test_search_renders_gallery(user: User):
     await user.open("/")
-    user.find(kind=nicegui_ui.input).type("galaxy")
+    user.find(marker="query").type("galaxy")
     with patch_search(return_value=result_page()) as mock_search:
         user.find(marker="search").click()
         await user.should_see("Showing 1-1 of 26,858 results for 'galaxy'.")
 
     await user.should_see("Galaxy Image")
-    mock_search.assert_awaited_once_with("galaxy", page=1)
+    mock_search.assert_awaited_once_with(
+        "galaxy", page=1, year_start=None, year_end=None, center=""
+    )
 
 
 async def test_next_advances_a_page(user: User):
     await user.open("/")
-    user.find(kind=nicegui_ui.input).type("galaxy")
+    user.find(marker="query").type("galaxy")
     pages = [
         result_page(page=1, has_next=True),
         result_page(page=2, has_prev=True, has_next=True),
@@ -87,7 +88,7 @@ async def test_next_advances_a_page(user: User):
 
 async def test_prev_returns_to_the_previous_page(user: User):
     await user.open("/")
-    user.find(kind=nicegui_ui.input).type("galaxy")
+    user.find(marker="query").type("galaxy")
     pages = [
         result_page(page=1, has_next=True),
         result_page(page=2, has_prev=True, has_next=True),
@@ -106,7 +107,7 @@ async def test_prev_returns_to_the_previous_page(user: User):
 
 async def test_pager_is_disabled_at_the_ends(user: User):
     await user.open("/")
-    user.find(kind=nicegui_ui.input).type("galaxy")
+    user.find(marker="query").type("galaxy")
     pages = [
         result_page(page=1, has_next=True),
         result_page(page=2, has_prev=True, has_next=False),
@@ -125,7 +126,7 @@ async def test_pager_is_disabled_at_the_ends(user: User):
 
 async def test_a_new_search_starts_over_at_page_one(user: User):
     await user.open("/")
-    user.find(kind=nicegui_ui.input).type("galaxy")
+    user.find(marker="query").type("galaxy")
     pages = [
         result_page(page=1, has_next=True),
         result_page(page=2, has_prev=True, has_next=True),
@@ -137,7 +138,7 @@ async def test_a_new_search_starts_over_at_page_one(user: User):
         user.find(marker="next").click()
         await user.should_see("Showing 25-25 of")
 
-        user.find(kind=nicegui_ui.input).type(" nebula")
+        user.find(marker="query").type(" nebula")
         user.find(marker="search").click()
         await user.should_see("Showing 1-1 of")
 
@@ -148,7 +149,7 @@ async def test_a_new_search_starts_over_at_page_one(user: User):
 
 async def test_search_reports_no_results(user: User):
     await user.open("/")
-    user.find(kind=nicegui_ui.input).type("nonsense")
+    user.find(marker="query").type("nonsense")
     with patch_search(return_value=SearchPage()):
         user.find(marker="search").click()
         await user.should_see("No images found for 'nonsense'.")
@@ -157,7 +158,7 @@ async def test_search_reports_no_results(user: User):
 
 async def test_search_reports_api_failure(user: User):
     await user.open("/")
-    user.find(kind=nicegui_ui.input).type("galaxy")
+    user.find(marker="query").type("galaxy")
     with patch_search(side_effect=NasaApiError("NASA is down")):
         user.find(marker="search").click()
         await user.should_see("Search failed. Please try again.")
@@ -174,7 +175,7 @@ async def test_blank_search_is_not_sent(user: User):
 async def show_results(user: User) -> None:
     """Run a search so the gallery has a card to click."""
     await user.open("/")
-    user.find(kind=nicegui_ui.input).type("galaxy")
+    user.find(marker="query").type("galaxy")
     with patch_search(return_value=result_page()):
         user.find(marker="search").click()
         await user.should_see("Showing 1-1 of")
@@ -225,3 +226,72 @@ async def test_reopening_the_detail_view_does_not_leak_elements(user: User):
             assert len(sources(user, "detail-image")) == 1
             user.find(marker="close-detail").click()
             await user.should_not_see(marker="detail-image")
+
+
+async def test_filters_narrow_the_search(user: User):
+    await user.open("/")
+    user.find(marker="query").type("apollo")
+    user.find(marker="year-start").type("1969")
+    user.find(marker="year-end").type("1972")
+    user.find(marker="center").type("jsc")
+    with patch_search(return_value=result_page(total_hits=489)) as mock_search:
+        user.find(marker="search").click()
+        await user.should_see("Filtered by 1969-1972, JSC.")
+
+    assert mock_search.await_args_list[-1].kwargs == {
+        "page": 1,
+        "year_start": 1969,
+        "year_end": 1972,
+        "center": "JSC",
+    }
+
+
+async def test_changing_a_filter_reruns_the_search_from_page_one(user: User):
+    await user.open("/")
+    user.find(marker="query").type("apollo")
+    pages = [
+        result_page(page=1, has_next=True),
+        result_page(page=2, has_prev=True, has_next=True),
+        result_page(page=1, has_next=True, total_hits=798),
+    ]
+    with patch_search(side_effect=pages) as mock_search:
+        user.find(marker="search").click()
+        await user.should_see("Showing 1-1 of")
+        user.find(marker="next").click()
+        await user.should_see("Showing 25-25 of")
+
+        user.find(marker="year-start").type("1969")
+        await user.should_see("Showing 1-1 of 798 results")
+
+    last = mock_search.await_args_list[-1]
+    assert last.kwargs["page"] == 1, "a filter change starts over at page one"
+    assert last.kwargs["year_start"] == 1969
+
+
+async def test_one_sided_year_ranges_are_reported(user: User):
+    await user.open("/")
+    user.find(marker="query").type("apollo")
+    user.find(marker="year-end").type("1975")
+    with patch_search(return_value=result_page()) as mock_search:
+        user.find(marker="search").click()
+        await user.should_see("Filtered by up to 1975.")
+
+    assert mock_search.await_args_list[-1].kwargs["year_start"] is None
+
+
+async def test_an_unfiltered_search_says_nothing_about_filters(user: User):
+    await user.open("/")
+    user.find(marker="query").type("galaxy")
+    with patch_search(return_value=result_page()):
+        user.find(marker="search").click()
+        await user.should_see("Showing 1-1 of 26,858 results for 'galaxy'.")
+        await user.should_not_see("Filtered by")
+
+
+async def test_filters_apply_to_an_empty_result_set(user: User):
+    await user.open("/")
+    user.find(marker="query").type("apollo")
+    user.find(marker="center").type("SSC")
+    with patch_search(return_value=result_page(results=[], total_hits=0)):
+        user.find(marker="search").click()
+        await user.should_see("No images found for 'apollo'. Filtered by SSC.")
