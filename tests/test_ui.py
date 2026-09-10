@@ -6,7 +6,7 @@ from nicegui import ui as nicegui_ui
 from nicegui.testing import User
 
 import ui as ui_module
-from nasa_api import NasaApiError, SearchPage
+from nasa_api import ImageAsset, NasaApiError, SearchPage
 
 IMAGES = [
     {
@@ -14,8 +14,28 @@ IMAGES = [
         "url": "https://example.com/galaxy.jpg",
         "description": "A spiral galaxy.",
         "nasa_id": "PIA00001",
+        "date_created": "2004-11-30T21:29:24Z",
+        "photographer": "A. Skywatcher",
+        "center": "JPL",
     }
 ]
+
+ASSET = ImageAsset(
+    nasa_id="PIA00001",
+    renditions={
+        "large": "https://example.com/galaxy~large.jpg",
+        "orig": "https://example.com/galaxy~orig.jpg",
+        "thumb": "https://example.com/galaxy~thumb.jpg",
+    },
+)
+
+
+def patch_asset(**kwargs):
+    return patch.object(ui_module, "get_asset", AsyncMock(**kwargs))
+
+
+def sources(user: User, marker: str) -> list[str]:
+    return [element.source for element in user.find(marker=marker).elements]
 
 
 def result_page(**kwargs) -> SearchPage:
@@ -149,3 +169,59 @@ async def test_blank_search_is_not_sent(user: User):
     with patch_search(side_effect=AssertionError("should not be called")):
         user.find(marker="search").click()
         await user.should_see("Enter a search term to get started.")
+
+
+async def show_results(user: User) -> None:
+    """Run a search so the gallery has a card to click."""
+    await user.open("/")
+    user.find(kind=nicegui_ui.input).type("galaxy")
+    with patch_search(return_value=result_page()):
+        user.find(marker="search").click()
+        await user.should_see("Showing 1-1 of")
+
+
+async def test_clicking_a_card_opens_the_detail_view(user: User):
+    await show_results(user)
+    with patch_asset(return_value=ASSET) as mock_asset:
+        user.find(marker="card").click()
+        await user.should_see(marker="detail-image")
+        await user.should_see("November 30, 2004")
+
+    await user.should_see("A. Skywatcher")
+    await user.should_see("JPL")
+    await user.should_see("Open the original file")
+    mock_asset.assert_awaited_once_with("PIA00001")
+    # The dialog shows a bigger rendition than the grid thumbnail.
+    assert sources(user, "detail-image") == ["https://example.com/galaxy~large.jpg"]
+
+
+async def test_detail_view_falls_back_to_the_preview_when_the_lookup_fails(user: User):
+    await show_results(user)
+    with patch_asset(side_effect=NasaApiError("No AssetDB records")):
+        user.find(marker="card").click()
+        await user.should_see(marker="detail-image")
+        await user.should_see("No AssetDB records")
+
+    # The gallery is untouched and the dialog still shows what it has.
+    await user.should_see("Showing 1-1 of")
+    assert sources(user, "detail-image") == ["https://example.com/galaxy.jpg"]
+
+
+async def test_closing_the_detail_view_discards_it(user: User):
+    await show_results(user)
+    with patch_asset(return_value=ASSET):
+        user.find(marker="card").click()
+        await user.should_see(marker="detail-image")
+        user.find(marker="close-detail").click()
+        await user.should_not_see(marker="detail-image")
+
+
+async def test_reopening_the_detail_view_does_not_leak_elements(user: User):
+    await show_results(user)
+    with patch_asset(return_value=ASSET):
+        for _ in range(3):
+            user.find(marker="card").click()
+            await user.should_see(marker="detail-image")
+            assert len(sources(user, "detail-image")) == 1
+            user.find(marker="close-detail").click()
+            await user.should_not_see(marker="detail-image")

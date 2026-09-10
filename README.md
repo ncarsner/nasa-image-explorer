@@ -34,7 +34,9 @@ pre-commit install
 ```
 
 Then open <http://127.0.0.1:8000>. Results are paged, 24 at a time, with
-prev/next controls under the gallery. The same search is available as JSON at
+prev/next controls under the gallery. Clicking a result opens the largest
+rendition NASA publishes for it, along with its date, photographer, center and
+full description. The same search is available as JSON at
 `/api/search?q=mars&page=2&limit=10`, and the OpenAPI docs at `/docs`.
 
 The API serves at most 10,000 results for a query, so deep paging stops there

@@ -1,10 +1,11 @@
 """NiceGUI components and layout for the NASA Image Explorer."""
 
 from dataclasses import dataclass
+from datetime import date
 
 from nicegui import ui
 
-from nasa_api import NasaApiError, SearchPage, search_images
+from nasa_api import NasaApiError, SearchPage, get_asset, search_images
 
 GRID_CLASSES = "w-full gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3"
 PROMPT = "Enter a search term to get started."
@@ -41,6 +42,41 @@ def render_main_page() -> None:
             )
         pager.set_visibility(False)
 
+    with ui.dialog() as detail, ui.card().classes("w-full max-w-3xl"):
+        detail_body = ui.column().classes("w-full gap-2")
+        with ui.row().classes("w-full justify-end"):
+            ui.button("Close", on_click=detail.close).props("flat").mark("close-detail")
+
+    def forget_detail(event) -> None:
+        """Drop the detail elements once the dialog closes, so none accumulate."""
+        if not event.value:
+            detail_body.clear()
+
+    detail.on_value_change(forget_detail)
+
+    async def open_detail(image: dict[str, str]) -> None:
+        """Open the dialog at once, then swap in the full-size asset when it lands."""
+        detail_body.clear()
+        with detail_body:
+            ui.label(image["title"]).classes("text-xl font-bold")
+            ui.spinner(size="lg")
+        detail.open()
+
+        url, original = image["url"], None
+        try:
+            asset = await get_asset(image["nasa_id"])
+        except NasaApiError as exc:
+            ui.notify(f"Showing the preview instead: {exc}", type="warning")
+        else:
+            url = asset.display_url or image["url"]
+            original = asset.original_url
+
+        if not detail.value:  # dismissed while the lookup was in flight
+            return
+        detail_body.clear()
+        with detail_body:
+            _render_detail(image, url, original)
+
     def show(found: SearchPage) -> None:
         """Paint one page of results and set the pager to match it."""
         gallery.clear()
@@ -55,7 +91,7 @@ def render_main_page() -> None:
         )
         with gallery:
             for image in found.results:
-                _render_card(image)
+                _render_card(image, open_detail)
         pager.set_visibility(True)
         prev_button.set_enabled(found.has_prev)
         next_button.set_enabled(found.has_next)
@@ -101,11 +137,43 @@ def render_main_page() -> None:
     next_button.on_click(lambda: turn_page(1))
 
 
-def _render_card(image: dict[str, str]) -> None:
-    """Render one search result as an image card with its title underneath."""
-    with ui.card().tight().classes("w-full"):
+def _render_card(image: dict[str, str], on_click) -> None:
+    """Render one search result as a clickable image card with its title underneath."""
+    card = ui.card().tight().classes("w-full cursor-pointer").mark("card")
+    with card:
         ui.image(image["url"]).classes("w-full aspect-square object-cover")
         with ui.card_section():
             ui.label(image["title"]).classes("font-medium line-clamp-2")
         if image["description"]:
             ui.tooltip(image["description"][:300])
+    card.on("click", lambda _, image=image: on_click(image))
+
+
+def _render_detail(image: dict[str, str], url: str, original: str | None) -> None:
+    """Fill the detail dialog: the biggest available rendition and its metadata."""
+    ui.image(url).classes("w-full max-h-[60vh] object-contain").mark("detail-image")
+    ui.label(image["title"]).classes("text-xl font-bold")
+
+    facts = [
+        ("Date", _format_date(image.get("date_created", ""))),
+        ("Photographer", image.get("photographer", "")),
+        ("Center", image.get("center", "")),
+    ]
+    for name, value in facts:
+        if value:
+            with ui.row().classes("gap-2 text-sm"):
+                ui.label(f"{name}:").classes("text-gray-500")
+                ui.label(value)
+
+    if image["description"]:
+        ui.label(image["description"]).classes("text-sm whitespace-pre-line")
+    if original:
+        ui.link("Open the original file", original, new_tab=True).classes("text-sm")
+
+
+def _format_date(value: str) -> str:
+    """`2004-11-30T21:29:24Z` -> `November 30, 2004`, or the raw value if unparsable."""
+    try:
+        return date.fromisoformat(value[:10]).strftime("%B %d, %Y")
+    except ValueError:
+        return value

@@ -9,9 +9,12 @@ from fastapi.testclient import TestClient
 
 import app as app_module
 from nasa_api import (
+    NASA_ASSET_URL,
     NASA_SEARCH_URL,
+    ImageAsset,
     NasaApiError,
     SearchPage,
+    get_asset,
     search_images,
 )
 
@@ -22,6 +25,9 @@ SAMPLE_ITEMS = [
                 "title": "Galaxy Image",
                 "description": "A spiral galaxy.",
                 "nasa_id": "PIA00001",
+                "date_created": "2004-11-30T21:29:24Z",
+                "photographer": "A. Skywatcher",
+                "center": "JPL",
             }
         ],
         "links": [
@@ -44,12 +50,18 @@ GALAXY_RESULT = {
     "url": "https://example.com/galaxy.jpg",
     "description": "A spiral galaxy.",
     "nasa_id": "PIA00001",
+    "date_created": "2004-11-30T21:29:24Z",
+    "photographer": "A. Skywatcher",
+    "center": "JPL",
 }
 NOVA_RESULT = {
     "title": "Untitled",
     "url": "https://example.com/nova.jpg",
     "description": "",
     "nasa_id": "PIA00003",
+    "date_created": "",
+    "photographer": "",
+    "center": "",
 }
 
 
@@ -288,3 +300,127 @@ def test_api_search_reports_upstream_failure(test_client):
 
     assert response.status_code == 502
     assert response.json()["detail"] == "NASA is down"
+
+
+ASSET_HREFS = [
+    "http://images-assets.nasa.gov/image/PIA00001/PIA00001~orig.jpg",
+    "http://images-assets.nasa.gov/image/PIA00001/PIA00001~large.jpg",
+    "http://images-assets.nasa.gov/image/PIA00001/PIA00001~small.jpg",
+    "http://images-assets.nasa.gov/image/PIA00001/PIA00001~thumb.jpg",
+    "http://images-assets.nasa.gov/image/PIA00001/metadata.json",
+]
+
+
+def asset_payload(hrefs=None) -> dict:
+    items = [{"href": href} for href in (ASSET_HREFS if hrefs is None else hrefs)]
+    return {"collection": {"items": items}}
+
+
+async def test_get_asset_keys_renditions_by_size():
+    seen: dict = {}
+    handler = responding(httpx.Response(200, json=asset_payload()), seen)
+
+    async with mock_client(handler) as client:
+        asset = await get_asset("PIA00001", client=client)
+
+    assert seen["url"] == f"{NASA_ASSET_URL}/PIA00001"
+    assert asset.nasa_id == "PIA00001"
+    # metadata.json carries no `~size`, so it is not a rendition.
+    assert sorted(asset.renditions) == ["large", "orig", "small", "thumb"]
+
+
+async def test_get_asset_upgrades_hrefs_to_https():
+    """The API hands back plain http, which a browser blocks on an https page."""
+    handler = responding(httpx.Response(200, json=asset_payload()))
+
+    async with mock_client(handler) as client:
+        asset = await get_asset("PIA00001", client=client)
+
+    assert all(url.startswith("https://") for url in asset.renditions.values())
+
+
+async def test_get_asset_escapes_the_nasa_id():
+    seen: dict = {}
+    handler = responding(httpx.Response(200, json=asset_payload([])), seen)
+
+    async with mock_client(handler) as client:
+        await get_asset("as11/40 5874", client=client)
+
+    assert seen["url"] == f"{NASA_ASSET_URL}/as11%2F40%205874"
+
+
+@pytest.mark.parametrize(
+    ("sizes", "expected"),
+    [
+        (["large", "medium", "orig", "small", "thumb"], "large"),
+        (["medium", "orig", "thumb"], "medium"),
+        # Plenty of items publish no `large` at all.
+        (["orig", "small", "thumb"], "orig"),
+        (["thumb"], "thumb"),
+    ],
+)
+async def test_display_url_falls_back_through_the_available_sizes(sizes, expected):
+    hrefs = [f"http://example.com/image/X/X~{size}.jpg" for size in sizes]
+    handler = responding(httpx.Response(200, json=asset_payload(hrefs)))
+
+    async with mock_client(handler) as client:
+        asset = await get_asset("X", client=client)
+
+    assert asset.display_url == f"https://example.com/image/X/X~{expected}.jpg"
+
+
+async def test_asset_without_renditions_has_no_urls():
+    handler = responding(httpx.Response(200, json=asset_payload([])))
+
+    async with mock_client(handler) as client:
+        asset = await get_asset("X", client=client)
+
+    assert asset.renditions == {}
+    assert asset.display_url is None
+    assert asset.original_url is None
+
+
+async def test_get_asset_reports_the_original_file():
+    handler = responding(httpx.Response(200, json=asset_payload()))
+
+    async with mock_client(handler) as client:
+        asset = await get_asset("PIA00001", client=client)
+
+    assert asset.original_url == (
+        "https://images-assets.nasa.gov/image/PIA00001/PIA00001~orig.jpg"
+    )
+
+
+@pytest.mark.parametrize("nasa_id", ["", "   "])
+async def test_get_asset_skips_request_for_a_blank_id(nasa_id):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request should be made for a blank id")
+
+    async with mock_client(handler) as client:
+        assert await get_asset(nasa_id, client=client) == ImageAsset(nasa_id="")
+
+
+async def test_get_asset_surfaces_the_api_reason_for_a_missing_id():
+    reason = "No AssetDB records for nasaid=NOT-A-REAL-ID"
+    handler = responding(httpx.Response(404, json={"reason": reason}))
+
+    async with mock_client(handler) as client:
+        with pytest.raises(NasaApiError, match="No AssetDB records"):
+            await get_asset("NOT-A-REAL-ID", client=client)
+
+
+async def test_get_asset_raises_on_transport_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("unreachable", request=request)
+
+    async with mock_client(handler) as client:
+        with pytest.raises(NasaApiError):
+            await get_asset("PIA00001", client=client)
+
+
+async def test_get_asset_rejects_an_unexpected_payload():
+    handler = responding(httpx.Response(200, json=["not", "a", "collection"]))
+
+    async with mock_client(handler) as client:
+        with pytest.raises(NasaApiError):
+            await get_asset("PIA00001", client=client)
