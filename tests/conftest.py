@@ -1,10 +1,11 @@
 """Shared test fixtures."""
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
 
 import pytest
 from nicegui.testing import User, user_simulation
 
+import nasa_api
 from ui import render_main_page
 
 # Brings in NiceGUI's storage/marker setup; we override its `user` fixture below.
@@ -20,3 +21,11 @@ async def user() -> AsyncGenerator[User, None]:
     """
     async with user_simulation(root=render_main_page) as simulated_user:
         yield simulated_user
+
+
+@pytest.fixture(autouse=True)
+def clear_search_cache() -> Iterator[None]:
+    """Keep each test's searches independent of the ones that ran before it."""
+    nasa_api.clear_cache()
+    yield
+    nasa_api.clear_cache()

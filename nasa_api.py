@@ -1,6 +1,10 @@
 """Client for the NASA Images API (https://images-api.nasa.gov)."""
 
-from dataclasses import dataclass, field
+import time
+from collections import OrderedDict
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field, replace
 from typing import Any
 from urllib.parse import quote, urlparse, urlunparse
 
@@ -19,6 +23,20 @@ MAX_RESULTS = 10_000
 # Not every item is published in every size, so the detail view falls back
 # through this order. `orig` sits mid-list because it can be a huge TIFF.
 RENDITION_PREFERENCE = ("large", "medium", "orig", "small", "thumb")
+
+CACHE_TTL = 300.0
+CACHE_MAX_ENTRIES = 128
+
+# One client for the life of the app, so connections and TLS sessions are reused.
+# NiceGUI page handlers have no request to hang a dependency off, so this lives
+# at module scope rather than in `app.state`.
+_shared_client: httpx.AsyncClient | None = None
+
+_CacheKey = tuple[str, int, int]
+_cache: "OrderedDict[_CacheKey, tuple[float, SearchPage]]" = OrderedDict()
+
+# Indirection so tests can wind the clock forward without sleeping.
+_clock = time.monotonic
 
 
 class NasaApiError(RuntimeError):
@@ -72,6 +90,25 @@ class ImageAsset:
         return self.renditions.get("orig")
 
 
+@asynccontextmanager
+async def api_lifespan(_app: Any = None) -> AsyncIterator[None]:
+    """Hold one HTTP client open for the life of the app; close it on shutdown."""
+    global _shared_client
+
+    _shared_client = httpx.AsyncClient(timeout=REQUEST_TIMEOUT)
+    try:
+        yield
+    finally:
+        client, _shared_client = _shared_client, None
+        clear_cache()
+        await client.aclose()
+
+
+def clear_cache() -> None:
+    """Forget every cached search."""
+    _cache.clear()
+
+
 async def search_images(
     query: str,
     *,
@@ -90,6 +127,11 @@ async def search_images(
     if not query:
         return SearchPage(page=page, page_size=page_size)
 
+    key = (query, page, page_size)
+    cached = _cached(key)
+    if cached is not None:
+        return cached
+
     params = {
         "q": query,
         "media_type": "image",
@@ -105,7 +147,9 @@ async def search_images(
     except ValueError as exc:
         raise NasaApiError("NASA image search returned malformed JSON") from exc
 
-    return _parse_page(payload, page, page_size)
+    found = _parse_page(payload, page, page_size)
+    _remember(key, found)
+    return found
 
 
 async def get_asset(
@@ -140,10 +184,41 @@ async def _get_url(
     params: dict[str, str | int] | None,
     client: httpx.AsyncClient | None,
 ) -> httpx.Response:
+    """Prefer an injected client, then the shared one, then a throwaway.
+
+    The throwaway keeps the module usable from a script that never ran the
+    lifespan, at the cost of a fresh connection per call.
+    """
+    client = client or _shared_client
     if client is not None:
         return await client.get(url, params=params)
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as owned_client:
         return await owned_client.get(url, params=params)
+
+
+def _cached(key: _CacheKey) -> SearchPage | None:
+    entry = _cache.get(key)
+    if entry is None:
+        return None
+    stored_at, found = entry
+    if _clock() - stored_at >= CACHE_TTL:
+        del _cache[key]
+        return None
+    _cache.move_to_end(key)
+    return _copy(found)
+
+
+def _remember(key: _CacheKey, found: SearchPage) -> None:
+    """Cache `found` under `key`, evicting the least recently used entry."""
+    _cache[key] = (_clock(), _copy(found))
+    _cache.move_to_end(key)
+    while len(_cache) > CACHE_MAX_ENTRIES:
+        _cache.popitem(last=False)
+
+
+def _copy(found: SearchPage) -> SearchPage:
+    """Hand out a fresh result list, so a caller cannot edit what is cached."""
+    return replace(found, results=list(found.results))
 
 
 def _raise_for_status(response: httpx.Response) -> None:

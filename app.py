@@ -3,10 +3,16 @@
 from fastapi import FastAPI, HTTPException, Query
 from nicegui import ui
 
-from nasa_api import DEFAULT_LIMIT, MAX_PAGE_SIZE, NasaApiError, search_images
+from nasa_api import (
+    DEFAULT_LIMIT,
+    MAX_PAGE_SIZE,
+    NasaApiError,
+    api_lifespan,
+    search_images,
+)
 from ui import render_main_page
 
-app = FastAPI(title="NASA Image Explorer")
+app = FastAPI(title="NASA Image Explorer", lifespan=api_lifespan)
 
 
 @app.get("/api/search")
