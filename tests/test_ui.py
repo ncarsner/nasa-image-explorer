@@ -2,6 +2,8 @@
 
 from unittest.mock import AsyncMock, patch
 
+import pytest
+from nicegui.functions.navigate import History
 from nicegui.testing import User
 
 import ui as ui_module
@@ -27,6 +29,23 @@ ASSET = ImageAsset(
         "thumb": "https://example.com/galaxy~thumb.jpg",
     },
 )
+
+
+@pytest.fixture(autouse=True)
+def no_real_requests():
+    """Fail any test whose UI reaches NASA without mocking the call first.
+
+    NiceGUI swallows exceptions raised in event handlers, so a stand-in that
+    raised would go unnoticed; this checks the stand-ins at teardown instead.
+    """
+    stand_ins = {"search_images": AsyncMock(), "get_asset": AsyncMock()}
+    with (
+        patch.object(ui_module, "search_images", stand_ins["search_images"]),
+        patch.object(ui_module, "get_asset", stand_ins["get_asset"]),
+    ):
+        yield
+    unmocked = {name: mock.await_args_list for name, mock in stand_ins.items()}
+    assert not any(unmocked.values()), f"unmocked NASA calls: {unmocked}"
 
 
 def patch_asset(**kwargs):
@@ -295,3 +314,123 @@ async def test_filters_apply_to_an_empty_result_set(user: User):
     with patch_search(return_value=result_page(results=[], total_hits=0)):
         user.find(marker="search").click()
         await user.should_see("No images found for 'apollo'. Filtered by SSC.")
+
+
+def record_urls():
+    """Capture every address-bar rewrite; `urls(mock)` lists them in order."""
+    return patch.object(History, "replace", autospec=True)
+
+
+def urls(mock_replace) -> list[str]:
+    return [call.args[1] for call in mock_replace.call_args_list]
+
+
+async def test_opening_a_search_url_loads_that_page(user: User):
+    page_two = result_page(page=2, has_prev=True, has_next=True)
+    with patch_search(return_value=page_two) as mock_search:
+        await user.open("/?q=mars&page=2")
+        await user.should_see("Showing 25-25 of 26,858 results for 'mars'.")
+
+    mock_search.assert_awaited_once_with(
+        "mars", page=2, year_start=None, year_end=None, center=""
+    )
+    assert user.find(marker="query").elements.pop().value == "mars"
+
+
+async def test_filters_in_the_url_fill_the_form_and_the_search(user: User):
+    with patch_search(return_value=result_page()) as mock_search:
+        await user.open("/?q=apollo&year_start=1969&year_end=1972&center=jsc")
+        await user.should_see("Filtered by 1969-1972, JSC.")
+
+    assert mock_search.await_args_list[-1].kwargs == {
+        "page": 1,
+        "year_start": 1969,
+        "year_end": 1972,
+        "center": "JSC",
+    }
+    assert user.find(marker="year-start").elements.pop().value == 1969
+    assert user.find(marker="center").elements.pop().value == "JSC"
+
+
+@pytest.mark.parametrize("path", ["/", "/?q=", "/?q=%20%20&page=3"])
+async def test_a_url_without_a_query_shows_the_empty_state(user: User, path):
+    with patch_search() as mock_search:
+        await user.open(path)
+        await user.should_see("Enter a search term to get started.")
+
+    mock_search.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/?q=mars&page=abc", {"page": 1}),
+        ("/?q=mars&page=-4", {"page": 1}),
+        (
+            "/?q=mars&year_start=69&year_end=soon",
+            {"year_start": None, "year_end": None},
+        ),
+    ],
+)
+async def test_unusable_url_values_are_ignored(user: User, path, expected):
+    with patch_search(return_value=result_page()) as mock_search:
+        await user.open(path)
+        await user.should_see("results for 'mars'")
+
+    kwargs = mock_search.await_args_list[-1].kwargs
+    assert {k: kwargs[k] for k in expected} == expected
+
+
+async def test_searching_and_paging_update_the_address_bar(user: User):
+    await user.open("/")
+    user.find(marker="query").type("mars rover")
+    pages = [result_page(page=1, has_next=True), result_page(page=2, has_prev=True)]
+    with record_urls() as mock_replace, patch_search(side_effect=pages):
+        user.find(marker="search").click()
+        await user.should_see("Showing 1-1 of")
+        user.find(marker="next").click()
+        await user.should_see("Showing 25-25 of")
+
+    assert urls(mock_replace) == ["/?q=mars+rover", "/?q=mars+rover&page=2"]
+
+
+async def test_the_address_bar_carries_the_filters(user: User):
+    await user.open("/")
+    user.find(marker="query").type("apollo")
+    user.find(marker="center").type("jsc")
+    with record_urls() as mock_replace, patch_search(return_value=result_page()):
+        user.find(marker="search").click()
+        await user.should_see("Filtered by JSC.")
+
+    assert urls(mock_replace)[-1] == "/?q=apollo&center=JSC"
+
+
+async def test_clearing_the_search_clears_the_address_bar(user: User):
+    with patch_search(return_value=result_page()):
+        await user.open("/?q=mars")
+        await user.should_see("results for 'mars'")
+
+    user.find(marker="query").clear()
+    with record_urls() as mock_replace:
+        user.find(marker="search").click()
+        await user.should_see("Enter a search term to get started.")
+
+    assert urls(mock_replace) == ["/"]
+
+
+async def test_reloading_the_address_bar_restores_the_search(user: User):
+    await user.open("/")
+    user.find(marker="query").type("nebula")
+    pages = [result_page(page=1, has_next=True), result_page(page=2, has_prev=True)]
+    with record_urls() as mock_replace, patch_search(side_effect=pages) as first:
+        user.find(marker="year-start").type("2004")  # searches on its own
+        await user.should_see("Showing 1-1 of")
+        user.find(marker="next").click()
+        await user.should_see("Showing 25-25 of")
+    address_bar = urls(mock_replace)[-1]
+
+    with patch_search(return_value=pages[1]) as reloaded:
+        await user.open(address_bar)
+        await user.should_see("Showing 25-25 of")
+
+    assert reloaded.await_args == first.await_args_list[-1]
