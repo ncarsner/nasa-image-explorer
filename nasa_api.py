@@ -2,7 +2,7 @@
 
 import time
 from collections import OrderedDict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -23,6 +23,10 @@ MAX_RESULTS = 10_000
 # Not every item is published in every size, so the detail view falls back
 # through this order. `orig` sits mid-list because it can be a huge TIFF.
 RENDITION_PREFERENCE = ("large", "medium", "orig", "small", "thumb")
+
+# Gallery cards render around 320px wide, so they stop at `medium` (1280px);
+# `large` and `orig` would be megabytes each for no visible gain.
+GALLERY_PREFERENCE = ("medium", "small", "thumb")
 
 CACHE_TTL = 300.0
 CACHE_MAX_ENTRIES = 128
@@ -276,14 +280,22 @@ def _parse_asset(nasa_id: str, payload: Any) -> ImageAsset:
     if not isinstance(payload, dict):
         raise NasaApiError("NASA asset lookup returned an unexpected payload")
 
+    items = (payload.get("collection") or {}).get("items") or []
+    renditions = _by_size(item.get("href") for item in items)
+    return ImageAsset(nasa_id=nasa_id, renditions=renditions)
+
+
+def _by_size(hrefs: Iterable[Any]) -> dict[str, str]:
+    """Index hrefs by their `~size`, dropping any that carry none.
+
+    The API lists sizes largest-first, so the first href for a size wins.
+    """
     renditions: dict[str, str] = {}
-    for item in (payload.get("collection") or {}).get("items") or []:
-        href = item.get("href")
+    for href in hrefs:
         size = _rendition_size(str(href)) if href else None
-        # The API lists sizes largest-first; keep the first href for each.
         if size and size not in renditions:
             renditions[size] = _https(str(href))
-    return ImageAsset(nasa_id=nasa_id, renditions=renditions)
+    return renditions
 
 
 def _rendition_size(href: str) -> str | None:
@@ -311,14 +323,14 @@ def _parse_items(items: list[Any], limit: int) -> list[dict[str, str]]:
     """Pull the preview image out of each search result, skipping any without one."""
     results: list[dict[str, str]] = []
     for item in items:
-        preview_url = _preview_url(item.get("links") or [])
+        preview_url = _gallery_url(item.get("links") or [])
         if preview_url is None:
             continue
         metadata = (item.get("data") or [{}])[0]
         results.append(
             {
                 "title": metadata.get("title") or "Untitled",
-                "url": _https(preview_url),
+                "url": preview_url,
                 "description": metadata.get("description") or "",
                 "nasa_id": metadata.get("nasa_id") or "",
                 "date_created": metadata.get("date_created") or "",
@@ -331,6 +343,21 @@ def _parse_items(items: list[Any], limit: int) -> list[dict[str, str]]:
         if len(results) >= limit:
             break
     return results
+
+
+def _gallery_url(links: list[dict[str, Any]]) -> str | None:
+    """The best rendition to show in a gallery card, or None if there is none.
+
+    Search results carry their renditions as `alternate` links, so a card need
+    not wait on `get_asset`. Items published in fewer sizes fall back down the
+    preference list, and anything without a sized href falls back to `preview`.
+    """
+    renditions = _by_size(link.get("href") for link in links)
+    for size in GALLERY_PREFERENCE:
+        if size in renditions:
+            return renditions[size]
+    preview_url = _preview_url(links)
+    return _https(preview_url) if preview_url else None
 
 
 def _preview_url(links: list[dict[str, Any]]) -> str | None:
