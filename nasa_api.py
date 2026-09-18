@@ -287,7 +287,7 @@ def _parse_asset(nasa_id: str, payload: Any) -> ImageAsset:
 
 
 def _rendition_size(href: str) -> str | None:
-    """`.../PIA07081~large.jpg` -> `large`. Files without a `~` (metadata.json) -> None."""
+    """`.../PIA07081~large.jpg` -> `large`. No `~` (metadata.json) -> None."""
     filename = urlparse(href).path.rsplit("/", 1)[-1]
     if "~" not in filename:
         return None
