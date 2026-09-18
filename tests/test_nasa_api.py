@@ -669,3 +669,95 @@ async def test_api_search_rejects_unusable_years(test_client, bad):
     response = test_client.get("/api/search", params={"q": "apollo", **bad})
 
     assert response.status_code == 422
+
+
+def sized(nasa_id: str, sizes, *, preview: str | None = None) -> dict:
+    """One search item whose `alternate` links carry exactly `sizes`."""
+    links = [
+        {
+            "rel": "alternate",
+            "href": f"http://images-assets.nasa.gov/{nasa_id}~{size}.jpg",
+        }
+        for size in sizes
+    ]
+    if preview is not None:
+        links.append({"rel": "preview", "href": preview})
+    return {"data": [{"title": nasa_id, "nasa_id": nasa_id}], "links": links}
+
+
+@pytest.mark.parametrize(
+    ("sizes", "expected"),
+    [
+        (("large", "medium", "small", "thumb"), "medium"),
+        (("large", "small", "thumb"), "small"),
+        (("large", "thumb"), "thumb"),
+        (("medium",), "medium"),
+    ],
+)
+async def test_gallery_cards_use_the_largest_size_worth_rendering(sizes, expected):
+    handler = responding(
+        httpx.Response(200, json=payload(items=[sized("PIA1", sizes)]))
+    )
+
+    async with mock_client(handler) as client:
+        found = await search_images("galaxy", client=client)
+
+    assert (
+        found.results[0]["url"] == f"https://images-assets.nasa.gov/PIA1~{expected}.jpg"
+    )
+
+
+async def test_gallery_cards_never_use_the_huge_renditions():
+    # `orig` can be a 200MB TIFF and `large` runs to megabytes; a card wants neither.
+    item = sized("PIA1", ("orig", "large", "medium"))
+    handler = responding(httpx.Response(200, json=payload(items=[item])))
+
+    async with mock_client(handler) as client:
+        found = await search_images("galaxy", client=client)
+
+    assert found.results[0]["url"].endswith("~medium.jpg")
+
+
+async def test_items_with_no_sized_rendition_fall_back_to_the_preview_link():
+    item = sized("PIA1", (), preview="http://images-assets.nasa.gov/odd/preview.jpg")
+    handler = responding(httpx.Response(200, json=payload(items=[item])))
+
+    async with mock_client(handler) as client:
+        found = await search_images("galaxy", client=client)
+
+    assert found.results[0]["url"] == "https://images-assets.nasa.gov/odd/preview.jpg"
+
+
+async def test_items_with_nothing_renderable_are_dropped():
+    items = [sized("PIA1", ("orig",)), sized("PIA2", ("medium",))]
+    handler = responding(httpx.Response(200, json=payload(items=items)))
+
+    async with mock_client(handler) as client:
+        found = await search_images("galaxy", client=client)
+
+    assert [result["nasa_id"] for result in found.results] == ["PIA2"]
+
+
+async def test_gallery_urls_are_upgraded_to_https():
+    handler = responding(
+        httpx.Response(200, json=payload(items=[sized("PIA1", ("medium",))]))
+    )
+
+    async with mock_client(handler) as client:
+        found = await search_images("galaxy", client=client)
+
+    assert found.results[0]["url"].startswith("https://")
+
+
+async def test_the_first_href_for_a_size_wins():
+    # The API can list a size more than once; the first entry is the canonical one.
+    hrefs = [
+        "https://example.com/PIA1~large.jpg",
+        "https://example.com/mirror/PIA1~large.jpg",
+    ]
+    handler = responding(httpx.Response(200, json=asset_payload(hrefs)))
+
+    async with mock_client(handler) as client:
+        asset = await get_asset("PIA1", client=client)
+
+    assert asset.renditions["large"] == "https://example.com/PIA1~large.jpg"

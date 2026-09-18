@@ -54,6 +54,11 @@ The address bar tracks the search, so a result page can be bookmarked, shared or
 reloaded: <http://127.0.0.1:8000/?q=apollo&page=2&year_start=1969&center=JSC>
 opens straight onto that page, with the form filled in to match.
 
+Gallery cards render the `medium` rendition (1280px) where NASA publishes one,
+falling back through `small` and `thumb`, so an item published in fewer sizes
+still appears. `large` and `orig` are left to the detail view - they run to
+megabytes each.
+
 The API serves at most 10,000 results for a query, so deep paging stops there
 even when a search reports far more hits. Identical searches are answered from
 a small in-process cache for five minutes, so paging back and forth does not
