@@ -1,8 +1,11 @@
 """NiceGUI components and layout for the NASA Image Explorer."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
+from urllib.parse import urlencode
 
+from fastapi import Request
 from nicegui import ui
 
 from nasa_api import NasaApiError, SearchPage, get_asset, search_images
@@ -36,17 +39,48 @@ class SearchState:
     year_end: int | None = None
     center: str = ""
 
+    @classmethod
+    def from_query(cls, params: Mapping[str, str]) -> "SearchState":
+        """Rebuild a search from a query string, ignoring anything unusable."""
+        return cls(
+            query=(params.get("q") or "").strip(),
+            page=_url_int(params.get("page"), 1, None) or 1,
+            year_start=_url_int(params.get("year_start"), 1000, 9999),
+            year_end=_url_int(params.get("year_end"), 1000, 9999),
+            center=(params.get("center") or "").strip().upper(),
+        )
 
-def render_main_page() -> None:
-    """Render the search page: a search bar above a paged image gallery."""
+    def to_query(self) -> str:
+        """The query string that reproduces this search, or "" for no search."""
+        if not self.query:
+            return ""
+        params = {
+            "q": self.query,
+            "page": self.page if self.page > 1 else None,
+            "year_start": self.year_start,
+            "year_end": self.year_end,
+            "center": self.center or None,
+        }
+        return urlencode({k: v for k, v in params.items() if v is not None})
+
+
+def render_main_page(request: Request) -> None:
+    """Render the search page: a search bar above a paged image gallery.
+
+    The search lives in the query string, so `/?q=mars&page=2` opens straight onto
+    that page and a reload lands back where it was.
+    """
     ui.page_title("NASA Image Explorer")
-    state = SearchState()
+    state = SearchState.from_query(request.query_params)
 
     with ui.column().classes("w-full max-w-5xl mx-auto p-4 gap-4"):
         ui.label("NASA Image Explorer").classes("text-3xl font-bold")
         with ui.row().classes("w-full items-center gap-2"):
             search_box = (
-                ui.input(placeholder="Search NASA images, e.g. 'Mars rover'")
+                ui.input(
+                    placeholder="Search NASA images, e.g. 'Mars rover'",
+                    value=state.query,
+                )
                 .classes("grow")
                 .mark("query")
             )
@@ -54,10 +88,17 @@ def render_main_page() -> None:
         filters = ui.expansion("Filters", icon="filter_alt").classes("w-full")
         filters.mark("filters")
         with filters, ui.row().classes("w-full items-center gap-4"):
-            year_start_box = _year_input("From year").mark("year-start")
-            year_end_box = _year_input("To year").mark("year-end")
+            year_start_box = _year_input("From year", state.year_start).mark(
+                "year-start"
+            )
+            year_end_box = _year_input("To year", state.year_end).mark("year-end")
             center_box = (
-                ui.input("Center", placeholder="e.g. JPL", autocomplete=list(CENTERS))
+                ui.input(
+                    "Center",
+                    placeholder="e.g. JPL",
+                    value=state.center,
+                    autocomplete=list(CENTERS),
+                )
                 .props("dense outlined clearable debounce=600")
                 .classes("grow")
                 .mark("center")
@@ -130,8 +171,20 @@ def render_main_page() -> None:
         prev_button.set_enabled(found.has_prev)
         next_button.set_enabled(found.has_next)
 
+    def sync_url() -> None:
+        """Mirror the search into the address bar, without reloading the page.
+
+        Replaces rather than pushes: Back has no handler to re-run an older
+        search, so pushed entries would change the URL and leave the results stale.
+        """
+        query = state.to_query()
+        ui.navigate.history.replace(
+            f"{request.url.path}?{query}" if query else request.url.path
+        )
+
     async def load() -> None:
         """Fetch the current query and page, then hand the results to `show`."""
+        sync_url()
         search_button.disable()
         prev_button.disable()
         next_button.disable()
@@ -171,6 +224,7 @@ def render_main_page() -> None:
             gallery.clear()
             pager.set_visibility(False)
             status.set_text(PROMPT)
+            sync_url()
             return
         await load()
 
@@ -186,11 +240,16 @@ def render_main_page() -> None:
     prev_button.on_click(lambda: turn_page(-1))
     next_button.on_click(lambda: turn_page(1))
 
+    if state.query:
+        # Wait for the browser to connect: the results and the URL rewrite both
+        # need a live client, and the page itself should not wait on NASA.
+        ui.timer(0, load, once=True)
 
-def _year_input(label: str) -> ui.number:
+
+def _year_input(label: str, value: int | None) -> ui.number:
     """A year box. Debounced, so typing 1969 is one search rather than four."""
     return (
-        ui.number(label, format="%d", min=1000, max=9999)
+        ui.number(label, value=value, format="%d", min=1000, max=9999)
         .props("dense outlined clearable debounce=600")
         .classes("w-36")
     )
@@ -202,6 +261,17 @@ def _year(value) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _url_int(value: str | None, low: int, high: int | None) -> int | None:
+    """A whole number from the URL within [low, high], or None. URLs get hand-edited."""
+    try:
+        number = int(value or "")
+    except ValueError:
+        return None
+    if number < low or (high is not None and number > high):
+        return None
+    return number
 
 
 def _filters_text(state: SearchState) -> str:

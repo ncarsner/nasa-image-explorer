@@ -45,6 +45,10 @@ from the first page. The same filters are query parameters on the endpoint:
 `/api/search?q=apollo&year_start=1969&year_end=1972&center=JSC`. Filters left
 blank are omitted from the request rather than sent empty, which the API rejects.
 
+The address bar tracks the search, so a result page can be bookmarked, shared or
+reloaded: <http://127.0.0.1:8000/?q=apollo&page=2&year_start=1969&center=JSC>
+opens straight onto that page, with the form filled in to match.
+
 The API serves at most 10,000 results for a query, so deep paging stops there
 even when a search reports far more hits. Identical searches are answered from
 a small in-process cache for five minutes, so paging back and forth does not
